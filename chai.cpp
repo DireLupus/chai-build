@@ -1,4 +1,5 @@
 #include "./include/command.hpp"
+#include <iostream>
 
 int main(int argc, char* argv[]) 
 { 
@@ -18,7 +19,7 @@ int main(int argc, char* argv[])
     command::add_command_option(std::string("remove_header_directory"), command::handle_remove_header_directory);
     command::add_command_option(std::string("remove_source_directory"), command::handle_remove_source_directory);
     command::add_command_option(std::string("remove_compile_flag"), command::handle_remove_compile_flag);
-    
+
     command::parse_commands(argc, argv);
     exit(0);
 }

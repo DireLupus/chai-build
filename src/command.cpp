@@ -1,6 +1,7 @@
 #include "../include/command.hpp"
 #include "../include/settings.hpp"
 #include "../include/timestamp.hpp"
+#include "../include/hashstamp.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -11,8 +12,12 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <unistd.h>
+#include <thread>
 #include <set>
+#include <mutex>
+#include <fstream>
+#include <sstream>
+#include <queue>
 
 std::map<std::string, std::function<void()>> command::null_arg_function_map;
 std::map<std::string, std::function<void(std::string)>> command::one_arg_function_map;
@@ -20,7 +25,7 @@ std::map<std::string, std::function<void(std::string, std::string)>> command::tw
 
 std::optional<std::filesystem::path> command::find_build_folder()
 {
-    std::filesystem::path resulting_path = std::filesystem::current_path();
+    std::filesystem::path resulting_path = std::filesystem::absolute(std::filesystem::current_path());
     resulting_path.append(".chai");
     
     while(!std::filesystem::exists(resulting_path))
@@ -48,17 +53,20 @@ std::vector<std::string> command::find_all_files(std::vector<std::string> source
   std::filesystem::path temp_path;
   for(const std::string& string_path : source_paths)
   {    
-    temp_path = std::filesystem::path(string_path);
-    if(std::filesystem::is_directory(temp_path))
-    {
-       command::append_path_vector(file_paths, command::get_files_from_directory(temp_path, extensions)); 
-    } else if(std::filesystem::is_regular_file(temp_path))
-    {
-        if(temp_path.has_extension() && std::find(extensions.begin(), extensions.end(), temp_path.extension()) != extensions.end())
-        {
-            file_paths.push_back(temp_path.string());
-        }
-    }
+	if(string_path != "")
+	{
+		temp_path = std::filesystem::absolute(string_path);
+		if(std::filesystem::is_directory(temp_path))
+		{
+		command::append_path_vector(file_paths, command::get_files_from_directory(temp_path, extensions)); 
+		} else if(std::filesystem::is_regular_file(temp_path))
+		{
+			if(temp_path.has_extension() && std::find(extensions.begin(), extensions.end(), temp_path.extension()) != extensions.end())
+			{
+				file_paths.push_back(temp_path.string());
+			}
+		}
+	}
   }
   
   return file_paths;
@@ -87,7 +95,7 @@ std::vector<std::string> command::get_files_from_directory(std::filesystem::path
 
 std::string command::unpack_string_vector(const std::vector<std::string> unpackable, std::string decoration = "")
 {
-    std::string returnable = " ";
+    std::string returnable = "";
     
     for(const std::string& unpack : unpackable)
     {
@@ -97,7 +105,7 @@ std::string command::unpack_string_vector(const std::vector<std::string> unpacka
         }
     }
     
-    return returnable;
+    return returnable.substr(0, returnable.length() - 1);
 }
 
 void command::append_path_vector(std::vector<std::string>& appendee, const std::vector<std::string>& appender)
@@ -215,7 +223,7 @@ void command::handle_init(std::string project_name)
     } else 
     {
         // TODO create new build, then recall
-        working_path = std::filesystem::current_path();
+        working_path = std::filesystem::absolute(std::filesystem::current_path());
         working_path.append(".chai");
         std::filesystem::create_directory(working_path);
         working_path.append("cache");
@@ -280,6 +288,8 @@ void command::handle_build(std::string project_name)
     
     std::map<std::string, std::vector<std::string>> project_layout = settings::read_from_file(project_layout_path);
     std::map<std::string, std::chrono::nanoseconds> file_timestamps = timestamp::read_from_file();
+	std::map<std::string, int> file_hashstamps = hashstamp::read_from_file();
+
         
     // TODO specify source files
     std::vector<std::string> source_files = command::find_all_files(project_layout.at("sources"), std::vector<std::string>({".cpp"}));
@@ -287,61 +297,131 @@ void command::handle_build(std::string project_name)
     std::string header_file_string = command::unpack_string_vector(project_layout.at("headers"), "-I");
     std::string compiler_flags_string = command::unpack_string_vector(project_layout.at("flags"));
     std::string library_string = command::unpack_string_vector(project_layout.at("libraries"), "-l");
-    std::string standard_string = " -std=" + project_layout.at("standard").at(0);
+    std::string standard_string = "-std=" + project_layout.at("standard").at(0);
     
     std::string object_command = "";
-    std::chrono::nanoseconds last_update;
     
     std::filesystem::current_path(project_layout_path.parent_path().append("build/objects/"));
     
-    std::string file_name = "";
     std::set<std::string> duplicate_checker;
-    for(const std::string& source_file : source_files)
+	std::queue<std::string> source_queue;
+
+	for(std::string str : source_files)
+	{
+		source_queue.push(str);
+	}
+
+	std::mutex queutex;
+	std::mutex trackertex;
+	auto safe_file_pop = [&](std::string& assignable) {  
+		queutex.lock();
+		if(source_files.empty())
+		{
+			queutex.unlock();
+			return false;
+		} else 
+		{
+			assignable = std::string(source_files.back());
+			source_files.pop_back();
+		}
+
+		queutex.unlock();
+		return true;
+	};
+	
+	auto thread_runnnable = [&](int thread_num) {
+		// TODO batch threads and make threads compile with -E to temp files, stuff every filename into a queue, 
+		// pop off queue for next compile, wrap mutex around queue
+		std::string source_file;
+		std::string hash_command;
+		std::string hashable;
+		std::string file_name = "";
+		std::ostringstream buffer;
+		std::fstream hash_file;
+
+		int hash = 0;
+		std::filesystem::path temp_file = std::filesystem::absolute(std::filesystem::current_path()).append("temp").append("chai_temp_" + std::to_string(thread_num));
+		while(safe_file_pop(source_file))
+		{						
+			file_name = std::filesystem::absolute(source_file).filename().string();
+						
+			// Compile to temp file
+			hash_command = "g++ -E " + std::filesystem::absolute(source_file).string() + " > " +  temp_file.string();
+			system(hash_command.c_str());
+
+			hash_file.open(temp_file);
+			if(hash_file) 
+			{
+				buffer.clear();
+				buffer << hash_file.rdbuf();
+				hashable = buffer.str();
+			}
+			hash_file.close();
+
+			hash = std::hash<std::string>{}(hashable);
+			if(!std::filesystem::exists(std::filesystem::absolute(std::filesystem::current_path()).append(file_name.substr(0, file_name.find(".")) + ".o")) || file_hashstamps.count(source_file) == 0 || file_hashstamps.at(source_file) != hash)
+			{
+				object_command = project_layout.at("compiler").at(0) +
+											" -c" +
+											+ " " + compiler_flags_string +
+											+ " " + library_string +
+											+ " " + header_file_string +
+											+ " " + source_file +
+											+ " " + standard_string;
+
+				system(object_command.c_str());
+
+				file_hashstamps.insert_or_assign(source_file, hash);
+			}
+		}
+        
+	};
+	
+	for(const std::string& file_name : source_files) 
+	{
+		if(!duplicate_checker.extract(std::filesystem::absolute(file_name).filename().string()))
+		{
+			duplicate_checker.insert(std::filesystem::absolute(file_name).filename().string());  
+		} else 
+		{
+			std::cerr << "Duplicate file detected!" << std::endl;
+			std::cerr << "This project has multiple files named \"" << std::filesystem::absolute(file_name).filename().string() << "\"" << std::endl; 
+			std::cerr << "Please rename one (or all) problematic files before rebuild" << std::endl;
+			return;
+		}
+	}
+
+	std::filesystem::path temp_directory = std::filesystem::absolute(std::filesystem::current_path()).append("temp");
+	std::filesystem::create_directory(temp_directory);
+	std::vector<std::thread> active_threads;
+	int max_threads = 8; // TODO this should be settable
+    for(int i = 0; i < max_threads; i++)
     {
-        file_name = std::filesystem::path(source_file).filename().string();
-        
-        if(!duplicate_checker.extract(file_name))
-        {
-            duplicate_checker.insert(file_name);  
-        } else 
-        {
-            std::cerr << "Duplicate file detected!" << std::endl;
-            std::cerr << "This project has multiple files named \"" << file_name << "\"" << std::endl; 
-            std::cerr << "Please rename one (or all) problematic files before rebuild" << std::endl;
-            return;
-        }
-        
-        last_update = std::filesystem::last_write_time(std::filesystem::path(source_file)).time_since_epoch();
-        if(!std::filesystem::exists(std::filesystem::current_path().append(file_name.substr(0, file_name.find(".")) + ".o")) || file_timestamps.count(source_file) == 0 || file_timestamps.at(source_file) != last_update)
-        {
-            object_command = project_layout.at("compiler").at(0) 
-                                            + " -c "
-                                            + compiler_flags_string
-                                            + library_string
-                                            + header_file_string
-                                            + source_file
-                                            + standard_string;
-            system(object_command.c_str());
-            file_timestamps.insert_or_assign(source_file, last_update);
-        }
+		active_threads.push_back(std::thread(thread_runnnable, i));
     }
+
+	for(std::thread& thread : active_threads)
+	{
+		thread.join();
+	}
+	std::filesystem::remove_all(temp_directory);
     
-    std::vector<std::string> object_files = command::find_all_files(std::vector<std::string>({std::filesystem::current_path().string()}), std::vector<std::string>({".o"}));
+    std::vector<std::string> object_files = command::find_all_files(std::vector<std::string>({std::filesystem::absolute(std::filesystem::current_path()).string()}), std::vector<std::string>({".o"}));
     
     std::string object_file_string = command::unpack_string_vector(object_files);
-    std::string exe_path_string = " -o " + project_layout_path.parent_path().append("build/executable/" + project_name).string();
+    std::string exe_path_string = "-o " + project_layout_path.parent_path().append("build/executable/" + project_name).string();
     
     // TODO compile .cpp files to .o files then do final compile 
      std::string final_command_string = project_layout.at("compiler").at(0) +
-                                        exe_path_string +
-                                        library_string +
-                                        header_file_string +
-                                        object_file_string +
-                                        standard_string;
+                                        + " " + exe_path_string +
+                                        + " " + library_string +
+                                        + " " + header_file_string +
+                                        + " " + object_file_string +
+                                        + " " + standard_string;
                                         
     system(final_command_string.c_str());
     
-    timestamp::write_to_file(file_timestamps);
+    hashstamp::write_to_file(file_hashstamps);
 }
 
 void command::handle_two_arg_command(std::string first_arg, std::string command, std::string second_arg) 
@@ -412,7 +492,7 @@ void command::handle_add_source_directory(std::string existing_project, std::str
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     
-    settings.at("sources").push_back(path);
+    settings.at("sources").push_back(std::filesystem::absolute(path).string());
     
     settings::write_to_file(settings, project_layout_path);
 }
