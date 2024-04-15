@@ -51,11 +51,9 @@ int settings::write_to_file(std::map<std::string, std::vector<std::string>> writ
         std::string formatted = "";
         for(std::string str : value)
         {
-            formatted = formatted + str;
-            formatted = formatted + " ";
+            formatted = formatted + str + " ";
         }
-        
-        file << std::quoted(formatted.substr(0, formatted.length() - 1)) << std::endl;
+        file << "\"" << formatted.substr(0, formatted.length() - 1) << "\"" << std::endl;
         
         count++;
     }
