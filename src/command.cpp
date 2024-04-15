@@ -4,17 +4,10 @@
 #include "../include/hashstamp.hpp"
 
 #include <chrono>
-#include <cstdlib>
-#include <filesystem>
-#include <functional>
 #include <iostream>
 #include <iterator>
-#include <string>
 #include <utility>
-#include <vector>
-#include <thread>
 #include <set>
-#include <mutex>
 #include <fstream>
 #include <sstream>
 #include <queue>
@@ -127,6 +120,72 @@ void command::parse_commands(int argc, char* argv[])
             std::cerr << "Incorrect number of arguments! Please use the 'chai help' command to view proper command formatting!" << std::endl;
             return;
     }
+}
+
+template <class T>
+bool command::thread_safe_vector_pop(T& assignable, std::vector<T>& popable, std::mutex& lock)
+{
+	lock.lock();
+	if(popable.empty())
+	{
+		lock.unlock();
+		return false;
+	} else 
+	{
+		assignable = std::string(popable.back());
+		popable.pop_back();
+	}
+
+	lock.unlock();
+	return true;
+}
+
+void command::thread_task_build_object(int thread_num, std::vector<std::string>& source_files, std::map<std::string, int>& file_hashstamps, std::mutex& queue_lock, std::mutex& timestamp_lock, std::string& object_build_format)
+{
+	std::string source_file;
+	std::string hash_command;
+	std::string object_command;
+	std::string hashable;
+	std::string file_name = "";
+	std::ostringstream buffer;
+	std::fstream hash_file;
+
+	int hash = 0;
+	std::filesystem::path temp_file = std::filesystem::absolute(std::filesystem::current_path()).append("temp").append("chai_temp_" + std::to_string(thread_num));
+	while(command::thread_safe_vector_pop<std::string>(source_file, source_files, queue_lock))
+	{						
+		file_name = std::filesystem::absolute(source_file).filename().string();
+					
+		// Compile to temp file
+		hash_command = "g++ -E " + std::filesystem::absolute(source_file).string() + " > " +  temp_file.string();
+		system(hash_command.c_str());
+
+		hash_file.open(temp_file);
+		if(hash_file) 
+		{
+			buffer.clear();
+			buffer << hash_file.rdbuf();
+			hashable = buffer.str();
+		}
+		hash_file.close();
+
+		hash = std::hash<std::string>{}(hashable);
+		timestamp_lock.lock();
+		if(!std::filesystem::exists(std::filesystem::absolute(std::filesystem::current_path()).append(file_name.substr(0, file_name.find(".")) + ".o")) 
+			|| file_hashstamps.count(source_file) == 0 
+			|| file_hashstamps.at(source_file) != hash)
+		{
+			timestamp_lock.unlock();
+			
+			object_command = command::format_build_command(object_build_format, source_file);
+
+			system(object_command.c_str());
+
+			timestamp_lock.lock();
+			file_hashstamps.insert_or_assign(source_file, hash);
+		}
+		timestamp_lock.unlock();
+	}
 }
 
 void command::add_command_option(std::string command, std::function<void()> command_function)
@@ -263,12 +322,13 @@ void command::handle_reset(std::string project_name)
     std::map<std::string, std::vector<std::string>> default_project_layout;
     
     // TODO make easier default;
-    default_project_layout.insert(std::make_pair("compiler", std::vector<std::string>()));
+    default_project_layout.insert(std::make_pair("compiler", std::vector<std::string>({"g++"})));
     default_project_layout.insert(std::make_pair("flags", std::vector<std::string>()));
     default_project_layout.insert(std::make_pair("libraries", std::vector<std::string>()));
     default_project_layout.insert(std::make_pair("headers", std::vector<std::string>()));
     default_project_layout.insert(std::make_pair("sources", std::vector<std::string>()));
     default_project_layout.insert(std::make_pair("standard", std::vector<std::string>()));
+	default_project_layout.insert(std::make_pair("threads", std::vector<std::string>({"8"})));
 
     settings::write_to_file(default_project_layout, project_layout_path);
 }
@@ -290,10 +350,10 @@ void command::handle_build(std::string project_name)
     std::map<std::string, std::chrono::nanoseconds> file_timestamps = timestamp::read_from_file();
 	std::map<std::string, int> file_hashstamps = hashstamp::read_from_file();
 
-        
     // TODO specify source files
     std::vector<std::string> source_files = command::find_all_files(project_layout.at("sources"), std::vector<std::string>({".cpp"}));
     
+	std::string compiler_string = project_layout.at("compiler").at(0);
     std::string header_file_string = command::unpack_string_vector(project_layout.at("headers"), "-I");
     std::string compiler_flags_string = command::unpack_string_vector(project_layout.at("flags"));
     std::string library_string = command::unpack_string_vector(project_layout.at("libraries"), "-l");
@@ -304,78 +364,9 @@ void command::handle_build(std::string project_name)
     std::filesystem::current_path(project_layout_path.parent_path().append("build/objects/"));
     
     std::set<std::string> duplicate_checker;
-	std::queue<std::string> source_queue;
-
-	for(std::string str : source_files)
-	{
-		source_queue.push(str);
-	}
 
 	std::mutex queutex;
-	std::mutex trackertex;
-	auto safe_file_pop = [&](std::string& assignable) {  
-		queutex.lock();
-		if(source_files.empty())
-		{
-			queutex.unlock();
-			return false;
-		} else 
-		{
-			assignable = std::string(source_files.back());
-			source_files.pop_back();
-		}
-
-		queutex.unlock();
-		return true;
-	};
-	
-	auto thread_runnnable = [&](int thread_num) {
-		// TODO batch threads and make threads compile with -E to temp files, stuff every filename into a queue, 
-		// pop off queue for next compile, wrap mutex around queue
-		std::string source_file;
-		std::string hash_command;
-		std::string hashable;
-		std::string file_name = "";
-		std::ostringstream buffer;
-		std::fstream hash_file;
-
-		int hash = 0;
-		std::filesystem::path temp_file = std::filesystem::absolute(std::filesystem::current_path()).append("temp").append("chai_temp_" + std::to_string(thread_num));
-		while(safe_file_pop(source_file))
-		{						
-			file_name = std::filesystem::absolute(source_file).filename().string();
-						
-			// Compile to temp file
-			hash_command = "g++ -E " + std::filesystem::absolute(source_file).string() + " > " +  temp_file.string();
-			system(hash_command.c_str());
-
-			hash_file.open(temp_file);
-			if(hash_file) 
-			{
-				buffer.clear();
-				buffer << hash_file.rdbuf();
-				hashable = buffer.str();
-			}
-			hash_file.close();
-
-			hash = std::hash<std::string>{}(hashable);
-			if(!std::filesystem::exists(std::filesystem::absolute(std::filesystem::current_path()).append(file_name.substr(0, file_name.find(".")) + ".o")) || file_hashstamps.count(source_file) == 0 || file_hashstamps.at(source_file) != hash)
-			{
-				object_command = project_layout.at("compiler").at(0) +
-											" -c" +
-											+ " " + compiler_flags_string +
-											+ " " + library_string +
-											+ " " + header_file_string +
-											+ " " + source_file +
-											+ " " + standard_string;
-
-				system(object_command.c_str());
-
-				file_hashstamps.insert_or_assign(source_file, hash);
-			}
-		}
-        
-	};
+	std::mutex hashtex;
 	
 	for(const std::string& file_name : source_files) 
 	{
@@ -394,10 +385,18 @@ void command::handle_build(std::string project_name)
 	std::filesystem::path temp_directory = std::filesystem::absolute(std::filesystem::current_path()).append("temp");
 	std::filesystem::create_directory(temp_directory);
 	std::vector<std::thread> active_threads;
-	int max_threads = 8; // TODO this should be settable
+	std::string build_command_format = compiler_string 
+										+ " -c" +
+										+ " "   + compiler_flags_string +
+										+ " "   + library_string +
+										+ " "   + header_file_string +
+										+ " "   + "{}" +
+										+ " "   + standard_string;
+	int max_threads = std::stoi(project_layout.at("threads").at(0).c_str());
     for(int i = 0; i < max_threads; i++)
     {
-		active_threads.push_back(std::thread(thread_runnnable, i));
+		// TODO somehow avoid using map?
+		active_threads.push_back(std::thread([&]() { command::thread_task_build_object(i, source_files, file_hashstamps, queutex, hashtex, build_command_format); }));
     }
 
 	for(std::thread& thread : active_threads)
@@ -411,7 +410,6 @@ void command::handle_build(std::string project_name)
     std::string object_file_string = command::unpack_string_vector(object_files);
     std::string exe_path_string = "-o " + project_layout_path.parent_path().append("build/executable/" + project_name).string();
     
-    // TODO compile .cpp files to .o files then do final compile 
      std::string final_command_string = project_layout.at("compiler").at(0) +
                                         + " " + exe_path_string +
                                         + " " + library_string +
