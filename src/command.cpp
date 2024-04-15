@@ -177,7 +177,7 @@ void command::thread_task_build_object(int thread_num, std::vector<std::string>&
 		{
 			timestamp_lock.unlock();
 			
-			object_command = command::format_build_command(object_build_format, source_file);
+			object_command = command::format_build_command(object_build_format, "-c", source_file);
 
 			system(object_command.c_str());
 
@@ -386,36 +386,32 @@ void command::handle_build(std::string project_name)
 	std::filesystem::create_directory(temp_directory);
 	std::vector<std::thread> active_threads;
 	std::string build_command_format = compiler_string 
-										+ " -c" +
+										+ " {}" +
 										+ " "   + compiler_flags_string +
 										+ " "   + library_string +
 										+ " "   + header_file_string +
 										+ " "   + "{}" +
 										+ " "   + standard_string;
+
 	int max_threads = std::stoi(project_layout.at("threads").at(0).c_str());
+	
     for(int i = 0; i < max_threads; i++)
     {
-		// TODO somehow avoid using map?
-		active_threads.push_back(std::thread([&]() { command::thread_task_build_object(i, source_files, file_hashstamps, queutex, hashtex, build_command_format); }));
+		active_threads.push_back(std::thread(command::thread_task_build_object, i, std::ref(source_files), std::ref(file_hashstamps), std::ref(queutex), std::ref(hashtex), std::ref(build_command_format)));
     }
 
 	for(std::thread& thread : active_threads)
 	{
 		thread.join();
 	}
+	
 	std::filesystem::remove_all(temp_directory);
-    
+
     std::vector<std::string> object_files = command::find_all_files(std::vector<std::string>({std::filesystem::absolute(std::filesystem::current_path()).string()}), std::vector<std::string>({".o"}));
-    
     std::string object_file_string = command::unpack_string_vector(object_files);
     std::string exe_path_string = "-o " + project_layout_path.parent_path().append("build/executable/" + project_name).string();
     
-     std::string final_command_string = project_layout.at("compiler").at(0) +
-                                        + " " + exe_path_string +
-                                        + " " + library_string +
-                                        + " " + header_file_string +
-                                        + " " + object_file_string +
-                                        + " " + standard_string;
+    std::string final_command_string = command::format_build_command(build_command_format, exe_path_string, object_file_string); 
                                         
     system(final_command_string.c_str());
     
