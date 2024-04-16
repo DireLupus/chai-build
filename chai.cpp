@@ -1,5 +1,4 @@
 #include "./include/command.hpp"
-#include <iostream>
 
 int main(int argc, char* argv[]) 
 { 

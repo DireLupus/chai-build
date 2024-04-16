@@ -4,13 +4,14 @@
 #include "../include/hashstamp.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <iterator>
 #include <utility>
 #include <set>
 #include <fstream>
 #include <sstream>
-#include <queue>
+#include <thread>
 
 std::map<std::string, std::function<void()>> command::null_arg_function_map;
 std::map<std::string, std::function<void(std::string)>> command::one_arg_function_map;
@@ -140,7 +141,7 @@ bool command::thread_safe_vector_pop(T& assignable, std::vector<T>& popable, std
 	return true;
 }
 
-void command::thread_task_build_object(int thread_num, std::vector<std::string>& source_files, std::map<std::string, int>& file_hashstamps, std::mutex& queue_lock, std::mutex& timestamp_lock, std::string& object_build_format)
+void command::thread_task_build_object(int thread_num, std::vector<std::string>& source_files, std::map<std::string, int>& file_hashstamps, std::mutex& queue_lock, std::mutex& timestamp_lock, std::string& hash_build_format, std::string& object_build_format)
 {
 	std::string source_file;
 	std::string hash_command;
@@ -157,7 +158,8 @@ void command::thread_task_build_object(int thread_num, std::vector<std::string>&
 		file_name = std::filesystem::absolute(source_file).filename().string();
 					
 		// Compile to temp file
-		hash_command = "g++ -E " + std::filesystem::absolute(source_file).string() + " > " +  temp_file.string();
+		hash_command = command::format_build_command(hash_build_format, std::filesystem::absolute(source_file).string(), temp_file.string());
+		
 		system(hash_command.c_str());
 
 		hash_file.open(temp_file);
@@ -223,19 +225,23 @@ void command::handle_help()
     std::cout << "Welcome to chai, a c++ project build tool!" << std::endl;
     std::cout << "Here are all of the available commands currently supported: " << std::endl;
     std::cout << "[x] help" << std::endl;
+    std::cout << "[ ] help command" << std::endl;
     std::cout << "[x] init project_name" << std::endl;
     std::cout << "[x] info project_name" << std::endl;
     std::cout << "[x] reset project_name" << std::endl;
     std::cout << "[x] build project_name" << std::endl;
-    std::cout << "[x] run project_name" << std::endl;
-    std::cout << "[ ] debug project_name" << std::endl;
     std::cout << "[ ] existing_project copy_to new_project" << std::endl;
     std::cout << "[ ] new_project copy_from existing_project" << std::endl;
+    std::cout << "[x] run project_name args" << std::endl;
+    std::cout << "[ ] debug project_name args" << std::endl;
     std::cout << "[ ] project_name rename new_name" << std::endl; 
     std::cout << "[x] project_name add_library path" << std::endl;
     std::cout << "[x] project_name add_source_directory path" << std::endl;
     std::cout << "[x] project_name add_header_directory path" << std::endl;
     std::cout << "[x] project_name add_compile_flags path" << std::endl;
+    std::cout << "[ ] project_name set_standard standard" << std::endl;
+    std::cout << "[ ] project_name set_compiler compiler" << std::endl;
+    std::cout << "[ ] project_name set_debugger debugger" << std::endl;
     std::cout << "[x] project_name remove_library path" << std::endl;
     std::cout << "[x] project_name remove_source_directory path" << std::endl; 
     std::cout << "[x] project_name remove_header_directory path" << std::endl;
@@ -266,7 +272,6 @@ void command::handle_init(std::string project_name)
     
     if(chai_path.has_value())
     {
-        // TODO create new project
         working_path = chai_path.value();
         working_path.append("projects/" + project_name);
         std::filesystem::create_directory(working_path);
@@ -281,7 +286,6 @@ void command::handle_init(std::string project_name)
         command::handle_reset(project_name);
     } else 
     {
-        // TODO create new build, then recall
         working_path = std::filesystem::absolute(std::filesystem::current_path());
         working_path.append(".chai");
         std::filesystem::create_directory(working_path);
@@ -316,12 +320,17 @@ void command::handle_info(std::string project_name)
 void command::handle_reset(std::string project_name) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
-    // TODO add check for nullopt
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + project_name + "/project_layout");
     
     std::map<std::string, std::vector<std::string>> default_project_layout;
     
-    // TODO make easier default;
     default_project_layout.insert(std::make_pair("compiler", std::vector<std::string>({"g++"})));
     default_project_layout.insert(std::make_pair("flags", std::vector<std::string>()));
     default_project_layout.insert(std::make_pair("libraries", std::vector<std::string>()));
@@ -333,14 +342,13 @@ void command::handle_reset(std::string project_name)
     settings::write_to_file(default_project_layout, project_layout_path);
 }
 
-// TODO make objects folder mimic subdirectories of src folder
 void command::handle_build(std::string project_name) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
 
     if(!chai_path.has_value())
     {
-        std::cerr << "O h F u c k" << std::endl;
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
         return;
     }
     
@@ -350,7 +358,6 @@ void command::handle_build(std::string project_name)
     std::map<std::string, std::chrono::nanoseconds> file_timestamps = timestamp::read_from_file();
 	std::map<std::string, int> file_hashstamps = hashstamp::read_from_file();
 
-    // TODO specify source files
     std::vector<std::string> source_files = command::find_all_files(project_layout.at("sources"), std::vector<std::string>({".cpp"}));
     
 	std::string compiler_string = project_layout.at("compiler").at(0);
@@ -358,9 +365,7 @@ void command::handle_build(std::string project_name)
     std::string compiler_flags_string = command::unpack_string_vector(project_layout.at("flags"));
     std::string library_string = command::unpack_string_vector(project_layout.at("libraries"), "-l");
     std::string standard_string = "-std=" + project_layout.at("standard").at(0);
-    
-    std::string object_command = "";
-    
+        
     std::filesystem::current_path(project_layout_path.parent_path().append("build/objects/"));
     
     std::set<std::string> duplicate_checker;
@@ -385,6 +390,7 @@ void command::handle_build(std::string project_name)
 	std::filesystem::path temp_directory = std::filesystem::absolute(std::filesystem::current_path()).append("temp");
 	std::filesystem::create_directory(temp_directory);
 	std::vector<std::thread> active_threads;
+	std::string hash_command_format = compiler_string + " -E {} > {}"; 
 	std::string build_command_format = compiler_string 
 										+ " {}" +
 										+ " "   + compiler_flags_string +
@@ -397,7 +403,7 @@ void command::handle_build(std::string project_name)
 	
     for(int i = 0; i < max_threads; i++)
     {
-		active_threads.push_back(std::thread(command::thread_task_build_object, i, std::ref(source_files), std::ref(file_hashstamps), std::ref(queutex), std::ref(hashtex), std::ref(build_command_format)));
+		active_threads.push_back(std::thread(command::thread_task_build_object, i, std::ref(source_files), std::ref(file_hashstamps), std::ref(queutex), std::ref(hashtex), std::ref(hash_command_format), std::ref(build_command_format)));
     }
 
 	for(std::thread& thread : active_threads)
@@ -439,7 +445,7 @@ void command::handle_run(std::string project_name, std::string args)
 
     if(!chai_path.has_value())
     {
-        std::cerr << "O h F u c k" << std::endl;
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
         return;
     }
     
@@ -494,6 +500,13 @@ void command::handle_add_source_directory(std::string existing_project, std::str
 void command::handle_add_compile_flag(std::string existing_project, std::string flag) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     
@@ -505,6 +518,13 @@ void command::handle_add_compile_flag(std::string existing_project, std::string 
 void command::handle_remove_library(std::string existing_project, std::string path) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     
@@ -517,7 +537,15 @@ void command::handle_remove_library(std::string existing_project, std::string pa
 void command::handle_remove_header_directory(std::string existing_project, std::string path) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
+    
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     
     std::vector<std::string>& reference = settings.at("headers");
@@ -528,6 +556,13 @@ void command::handle_remove_header_directory(std::string existing_project, std::
 void command::handle_remove_source_directory(std::string existing_project, std::string path) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     
@@ -540,6 +575,13 @@ void command::handle_remove_source_directory(std::string existing_project, std::
 void command::handle_remove_compile_flag(std::string existing_project, std::string flag) 
 {
     std::optional<std::filesystem::path> chai_path = command::find_build_folder();
+    
+    if(!chai_path.has_value())
+    {
+        std::cerr << "Cannot find build folder, consider creating a project with 'chai init project_name'!" << std::endl;
+        return;
+    }
+    
     std::filesystem::path project_layout_path = chai_path.value().append("projects/" + existing_project + "/project_layout");
     std::map<std::string, std::vector<std::string>> settings = settings::read_from_file(project_layout_path);
     

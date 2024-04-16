@@ -3,7 +3,6 @@
 
 #include <fstream>
 #include <string>
-#include <chrono>
 #include <iostream>
 
 std::map<std::string, int> hashstamp::read_from_file()
