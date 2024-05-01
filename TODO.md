@@ -16,6 +16,7 @@
   [ ] project_name set_standard standard
   [ ] project_name set_compiler compiler
   [ ] project_name set_debugger debugger
+  [ ] project_name set_threads threads
   [x] project_name remove_library path
   [x] project_name remove_source_directory path
   [x] project_name remove_header_directory path
