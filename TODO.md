@@ -1,5 +1,6 @@
 [ ] Command List
   [x] help
+  [ ] help command
   [x] init project_name
   [x] info project_name
   [x] reset project_name

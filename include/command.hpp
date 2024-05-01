@@ -4,9 +4,7 @@
 #include <optional>
 #include <filesystem>
 #include <vector>
-#include <thread>
 #include <mutex>
-#include <iostream>
 
 class command 
 {
@@ -23,7 +21,7 @@ class command
 		template <class T>
 		static bool thread_safe_vector_pop(T& assignable, std::vector<T>& popable, std::mutex& lock);
 
-		static void thread_task_build_object(int thread_num, std::vector<std::string>& source_files, std::map<std::string, int>& file_hashstamps, std::mutex& queue_lock, std::mutex& timestamp_lock, std::string& object_build_format);
+		static void thread_task_build_object(int thread_num, std::vector<std::string>& source_files, std::map<std::string, int>& file_hashstamps, std::mutex& queue_lock, std::mutex& timestamp_lock, std::string& hash_build_format, std::string& object_build_format);
     public :
 		static std::string format_build_command(const std::string& format)
 		{
